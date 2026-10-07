@@ -27,7 +27,7 @@ const toast = (kind, msg) => {
 };
 
 /** 扩展版本 —— 出问题时先看控制台这一行，确认加载的是哪一版 */
-const EXT_VERSION = '0.13.1';
+const EXT_VERSION = '0.13.2';
 
 /* ---------- 性别识别 ----------
  * AI 在中文语境下会写 "女" / "女生" / "女性"，英文语境会写 "female"。
@@ -301,10 +301,13 @@ const DEFAULT_STATE = {
 };
 
 const DEFAULT_SETTINGS = Object.freeze({
-    alwaysShowLauncher: false,
+    // v0.13.2 起默认开启：装好了就该看得见入口，
+    // 否则「选了别的角色 / 还没导入卡」时悬浮球完全不出现，用户以为没装成功。
+    alwaysShowLauncher: true,
     autoExtract: true,
     syncLorebook: true,
     quietFallback: true,
+    _settingsVersion: 2,
 });
 
 /* ============================================================
@@ -314,10 +317,22 @@ const DEFAULT_SETTINGS = Object.freeze({
 function getSettings() {
     const { extensionSettings } = C();
     if (!extensionSettings[MODULE_NAME]) extensionSettings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
-    for (const k of Object.keys(DEFAULT_SETTINGS)) {
-        if (!Object.hasOwn(extensionSettings[MODULE_NAME], k)) extensionSettings[MODULE_NAME][k] = DEFAULT_SETTINGS[k];
+    const st = extensionSettings[MODULE_NAME];
+
+    // 一次性迁移：0.13.1 及更早版本 alwaysShowLauncher 默认是 false，
+    // 导致「扩展装好了但悬浮球不出现」。这里强制打开一次，之后用户自己关掉就不再覆盖。
+    // 注意：必须在补默认值之前判断版本 —— 否则 _settingsVersion 会先被默认值填成 2，
+    // 迁移就永远不会执行了。
+    if ((st._settingsVersion ?? 1) < 2) {
+        st.alwaysShowLauncher = true;
+        st._settingsVersion = 2;
+        try { C().saveSettingsDebounced(); } catch { /* ignore */ }
     }
-    return extensionSettings[MODULE_NAME];
+
+    for (const k of Object.keys(DEFAULT_SETTINGS)) {
+        if (!Object.hasOwn(st, k)) st[k] = DEFAULT_SETTINGS[k];
+    }
+    return st;
 }
 
 /** 读取角色卡里预置的初始档案（存在 extensions.radiowave.seed，不进提示词） */
@@ -2227,6 +2242,8 @@ function buildSettingsUI() {
 
 function shouldShowLauncher() {
     if (getSettings().alwaysShowLauncher) return true;
+    // 已经开局的聊天里也显示 —— 避免「扩展装好了却找不到入口」
+    try { if ((C().chat?.length ?? 0) > 0) return true; } catch { /* ignore */ }
     if (C().chatMetadata?.[MODULE_NAME]) return true;
     try {
         const ch = C().characters?.[C().characterId];
@@ -2236,9 +2253,17 @@ function shouldShowLauncher() {
     return false;
 }
 
+let _launcherHinted = false;
 function refreshLauncher() {
     buildShell();
-    $q('#rw_launcher')?.classList.toggle('rw_hidden', !shouldShowLauncher());
+    const show = shouldShowLauncher();
+    $q('#rw_launcher')?.classList.toggle('rw_hidden', !show);
+    // 只在第一次隐藏时提示一次，免得刷屏
+    if (!show && !_launcherHinted) {
+        _launcherHinted = true;
+        log('悬浮球暂不显示：当前没有选中《无意识电波》这张卡，也没有已打开的聊天。'
+            + '想让它无条件出现，就在扩展设置面板里勾选「始终显示悬浮按钮」。');
+    }
     updateBadge();
 }
 

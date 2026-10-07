@@ -1,0 +1,14 @@
+{
+    "display_name": "无意识电波 · App 前端",
+    "loading_order": 100,
+    "js": "index.js",
+    "css": "style.css",
+    "author": "DSH / 无意识电波",
+    "version": "0.13.1",
+    "homePage": "",
+    "auto_update": false,
+    "minimum_client_version": "1.12.0",
+    "requires": [],
+    "optional": [],
+    "dependencies": []
+}

@@ -27,7 +27,7 @@ const toast = (kind, msg) => {
 };
 
 /** 扩展版本 —— 出问题时先看控制台这一行，确认加载的是哪一版 */
-const EXT_VERSION = '0.13.2';
+const EXT_VERSION = '0.13.3';
 
 /* ---------- 性别识别 ----------
  * AI 在中文语境下会写 "女" / "女生" / "女性"，英文语境会写 "female"。
@@ -2150,6 +2150,10 @@ function buildSettingsUI() {
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
+            <div class="rw_btns" style="margin-bottom:10px">
+                <button id="rw_b_open" class="menu_button" style="font-weight:700">📱 打开 App 面板</button>
+                <button id="rw_b_probe" class="menu_button">悬浮球自检</button>
+            </div>
             <label class="checkbox_label"><input type="checkbox" id="rw_s_show" ${st.alwaysShowLauncher ? 'checked' : ''}>
                 <span>始终显示悬浮按钮（不依赖角色卡）</span></label>
             <label class="checkbox_label"><input type="checkbox" id="rw_s_extract" ${st.autoExtract ? 'checked' : ''}>
@@ -2167,7 +2171,9 @@ function buildSettingsUI() {
             </div>
             <small style="opacity:.7;display:block;margin-top:6px">
                 「重新处理变量」会重扫整个聊天里的 &lt;电波状态&gt; 块；「重新同步电波」会把所有生效中的电波重写进世界书；
-                「重新读取初始变量」会清空本档 App 数据并从开场白重建。
+                「重新读取初始变量」会清空本档 App 数据并从开场白重建。<br>
+                <b>「打开 App 面板」是保底入口</b> —— 悬浮球万一没显示，从这里也能进 App。
+                「悬浮球自检」会把位置、样式和「谁盖住了它」写进控制台日志。
             </small>
         </div>
     </div>`;
@@ -2182,6 +2188,32 @@ function buildSettingsUI() {
     bind('#rw_s_extract', 'autoExtract');
     bind('#rw_s_quiet', 'quietFallback');
     bind('#rw_s_lore', 'syncLorebook');
+
+    // 保底入口：悬浮球万一没显示，从这里也能进 App
+    $q('#rw_b_open').addEventListener('click', () => {
+        try {
+            openPanel();
+        } catch (e) {
+            warn('打开面板失败', e);
+            toast('error', '打开失败，请看控制台日志');
+        }
+    });
+
+    // 自检：把悬浮球的位置、样式、以及「谁盖住了它」打进日志
+    $q('#rw_b_probe').addEventListener('click', () => {
+        const el = $q('#rw_launcher');
+        if (!el) {
+            warn('自检：悬浮球元素根本不存在。buildShell() 可能失败了。');
+            toast('error', '悬浮球元素不存在，请看控制台');
+            return;
+        }
+        layoutLauncher(true);          // 先强制摆好位置再测
+        setTimeout(() => {
+            probeLauncher();
+            const r = el.getBoundingClientRect();
+            toast('info', `悬浮球在 left=${Math.round(r.left)} top=${Math.round(r.top)}，详见控制台日志`);
+        }, 120);
+    });
 
     $q('#rw_b_rescan').addEventListener('click', async () => {
         const s = getState();
@@ -2254,12 +2286,77 @@ function shouldShowLauncher() {
 }
 
 let _launcherHinted = false;
+
+/**
+ * 悬浮球定位。
+ *
+ * 教训：只靠 style.css 里的 `position: fixed` 在手机上不可靠 ——
+ * 酒馆主题、SillyDroid 宿主样式、或者某个祖先元素上的 transform/filter
+ * 都可能让 fixed 失效，或者把它压到看不见的地方。
+ * 所以这里用**内联样式**写死关键属性（优先级仅次于 !important），
+ * 并在挂载后做一次自检，把「谁盖住了我」打进日志。
+ */
+function layoutLauncher(show) {
+    const el = $q('#rw_launcher');
+    if (!el) return null;
+    const narrow = (window.innerWidth || 400) <= 460;
+    Object.assign(el.style, {
+        position: 'fixed',
+        left: 'auto',
+        top: 'auto',
+        right: narrow ? '14px' : '18px',
+        bottom: narrow ? '84px' : '92px',
+        width: narrow ? '46px' : '50px',
+        height: narrow ? '46px' : '50px',
+        margin: '0',
+        padding: '0',
+        zIndex: '2147483000',
+        visibility: 'visible',
+        opacity: '1',
+        pointerEvents: 'auto',
+        transform: 'none',
+        display: show ? 'flex' : 'none',
+    });
+    el.classList.remove('rw_hidden');
+    return el;
+}
+
+/** 挂载后自检：位置、计算样式、以及中心点最上层是谁 */
+function probeLauncher() {
+    const el = $q('#rw_launcher');
+    if (!el) { warn('悬浮球自检失败：找不到 #rw_launcher 元素'); return; }
+    const r = el.getBoundingClientRect();
+    const cs = window.getComputedStyle(el);
+    const cx = Math.round(r.left + r.width / 2);
+    const cy = Math.round(r.top + r.height / 2);
+    const inView = cx > 0 && cy > 0 && cx < window.innerWidth && cy < window.innerHeight;
+    let top = null;
+    try { top = inView ? document.elementFromPoint(cx, cy) : null; } catch { /* ignore */ }
+    const mine = !!top && (top === el || el.contains(top));
+    log('悬浮球自检：', {
+        位置: `left=${Math.round(r.left)} top=${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`,
+        视口: `${window.innerWidth}x${window.innerHeight}`,
+        计算样式: `display=${cs.display} visibility=${cs.visibility} opacity=${cs.opacity} z-index=${cs.zIndex} position=${cs.position}`,
+        中心点在视口内: inView,
+        中心点最上层: top ? (top.id ? ('#' + top.id) : (top.className || top.tagName)) : '（在视口外）',
+        最上层就是我自己: mine,
+        结论: !inView ? '❌ 被定位到视口外了'
+            : (mine ? '✅ 可见且在最上层' : '❌ 被其他元素盖住了'),
+    });
+}
+
 function refreshLauncher() {
     buildShell();
     const show = shouldShowLauncher();
-    $q('#rw_launcher')?.classList.toggle('rw_hidden', !show);
-    // 只在第一次隐藏时提示一次，免得刷屏
-    if (!show && !_launcherHinted) {
+    const el = layoutLauncher(show);
+
+    if (!el) {
+        warn('悬浮球没能创建出来 —— buildShell() 可能失败了，请把上面的报错发我');
+        return;
+    }
+    if (show) {
+        setTimeout(probeLauncher, 400);
+    } else if (!_launcherHinted) {
         _launcherHinted = true;
         log('悬浮球暂不显示：当前没有选中《无意识电波》这张卡，也没有已打开的聊天。'
             + '想让它无条件出现，就在扩展设置面板里勾选「始终显示悬浮按钮」。');
@@ -2301,6 +2398,18 @@ async function init() {
     // 角色卡的完整数据是「浅加载」的，可能晚于本扩展加载 —— 所以定时补种几次
     eventSource.on(event_types.APP_READY, () => { refreshLauncher(); doSeed('APP_READY'); });
     [400, 1200, 2500, 5000].forEach(ms => setTimeout(() => doSeed(`延时 ${ms}ms`), ms));
+
+    // 悬浮球要盯三个情况：
+    //  1. 酒馆自己重绘 UI 时把我们的元素冲掉
+    //  2. 手机旋转 / 键盘弹出导致视口变化，fixed 定位需要重算
+    //  3. 角色卡数据晚加载，shouldShowLauncher() 的判断结果会变
+    [300, 1000, 2000, 4000, 8000].forEach(ms => setTimeout(() => {
+        try { refreshLauncher(); } catch (e) { warn('定时刷新悬浮球失败', e); }
+    }, ms));
+    try {
+        window.addEventListener('resize', () => { try { refreshLauncher(); } catch { /* ignore */ } });
+        window.addEventListener('orientationchange', () => { try { refreshLauncher(); } catch { /* ignore */ } });
+    } catch { /* ignore */ }
 
     log(`扩展已加载 v${EXT_VERSION}`);
     log('诊断快照：', seedProbe());

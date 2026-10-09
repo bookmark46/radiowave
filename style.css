@@ -402,6 +402,14 @@
 #rw_panel .sa-card.dimmed { opacity: .72; background: #fbfafd; }
 #rw_panel .sa-card.dimmed:hover { opacity: 1; }
 
+/* ---------- 经验档案：性癖标签 ---------- */
+#rw_panel .sa-kinktag {
+    font-size: 11.5px; font-weight: 800; padding: 4px 10px; border-radius: 9px;
+    background: linear-gradient(120deg, #ffeef6, #f6ecff); color: #b0407f;
+    border: 1px solid #ffdcec;
+}
+#rw_panel .sa-tagempty { font-size: 11.5px; color: #c9c2d8; font-weight: 700; }
+
 /* ---------- 弹窗 ---------- */
 #rw_modal {
     position: fixed; inset: 0; z-index: 30002; display: none;
@@ -424,6 +432,40 @@
 }
 #rw_modal input:focus, #rw_modal textarea:focus, #rw_modal select:focus { border-color: #b18cff; background: #fff; }
 #rw_modal textarea { min-height: 76px; line-height: 1.6; }
+
+/* 字段分组标题 */
+#rw_modal .rw_group {
+    margin: 18px 0 2px; padding-bottom: 5px;
+    border-bottom: 1.5px solid #ece6f6;
+    font-size: 12px; font-weight: 800; color: #7b4fd6; letter-spacing: .04em;
+}
+#rw_modal .rw_field { margin: 0; }
+#rw_modal input[type="date"], #rw_modal input[type="time"] { font-variant-numeric: tabular-nums; }
+
+/* 标签编辑器（性癖） */
+#rw_modal .rw_tagsbox { border: 1.5px solid #ece6f6; border-radius: 12px; padding: 9px 10px; background: #fcfaff; }
+#rw_modal .rw_taglist { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; min-height: 20px; }
+#rw_modal .rw_tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: linear-gradient(120deg, #f3ecff, #ece1ff); color: #7b4fd6;
+    border: 1px solid #e4d8ff; border-radius: 8px;
+    padding: 3px 5px 3px 9px; font-size: 12px; font-weight: 800;
+}
+#rw_modal .rw_tagx {
+    border: 0; background: rgba(123, 79, 214, .13); color: #7b4fd6;
+    width: 16px; height: 16px; border-radius: 50%; cursor: pointer;
+    font-size: 12px; line-height: 1; padding: 0; font-weight: 900;
+}
+#rw_modal .rw_tagx:hover { background: #ff3b5c; color: #fff; }
+#rw_modal .rw_tagempty { font-size: 11px; color: #c9c2d8; font-weight: 700; }
+#rw_modal .rw_tagadd { display: flex; gap: 6px; }
+#rw_modal .rw_tagadd input { flex: 1; min-width: 0; padding: 7px 10px; font-size: 12.5px; }
+#rw_modal .rw_tagadd button {
+    border: 0; border-radius: 10px; padding: 7px 12px; cursor: pointer; flex: none;
+    background: linear-gradient(120deg, #a78bfa, #8b5cf6); color: #fff;
+    font-size: 12px; font-weight: 800; white-space: nowrap;
+}
+
 #rw_modal .rw_acts { display: flex; gap: 9px; margin-top: 18px; }
 #rw_modal .rw_acts button { flex: 1; border: 0; border-radius: 99px; padding: 11px; font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; }
 #rw_modal .rw_ok { background: linear-gradient(120deg, #a78bfa, #8b5cf6); color: #fff; }

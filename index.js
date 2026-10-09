@@ -27,7 +27,7 @@ const toast = (kind, msg) => {
 };
 
 /** 扩展版本 —— 出问题时先看控制台这一行，确认加载的是哪一版 */
-const EXT_VERSION = '0.13.3';
+const EXT_VERSION = '0.13.4';
 
 /* ---------- 性别识别 ----------
  * AI 在中文语境下会写 "女" / "女生" / "女性"，英文语境会写 "female"。
@@ -220,7 +220,7 @@ const WEAR_MIGRATION = {
 function emptyRegions() {
     const out = {};
     for (const r of NPC_REGIONS) {
-        if (r.kind === 'exp') { out.exp = { count: 0, virgin: true, kinks: '' }; continue; }
+        if (r.kind === 'exp') { out.exp = { count: 0, virgin: true, kinks: [] }; continue; }
         out[r.key] = {};
         for (const [f] of r.fields) out[r.key][f] = r.typed ? { desc: '', type: '' } : '';
     }
@@ -234,6 +234,14 @@ function migrateNpc(n) {
     for (const r of NPC_REGIONS) {
         if (r.kind === 'exp') {
             n.exp = { ...blank.exp, ...(n.exp && typeof n.exp === 'object' ? n.exp : {}) };
+            // 性癖：v0.13.3 起是「2-5 字标签」的数组，旧数据是自由文本 —— 拆开
+            if (typeof n.exp.kinks === 'string') {
+                n.exp.kinks = n.exp.kinks.split(/[、，,;；/|]/).map(x => x.trim()).filter(Boolean).slice(0, 8);
+            }
+            if (!Array.isArray(n.exp.kinks)) n.exp.kinks = [];
+            n.exp.kinks = n.exp.kinks.map(x => String(x).trim()).filter(Boolean);
+            // 去重
+            n.exp.kinks = [...new Set(n.exp.kinks)];
             continue;
         }
         if (!n[r.key] || typeof n[r.key] !== 'object') n[r.key] = {};
@@ -335,12 +343,23 @@ function getSettings() {
     return st;
 }
 
-/** 读取角色卡里预置的初始档案（存在 extensions.radiowave.seed，不进提示词） */
+/**
+ * 读取角色卡里预置的初始档案（存在 extensions.radiowave.seed，不进提示词）。
+ *
+ * 坑：characters[chid].data 是浅加载的，chid 在群聊里还可能是 undefined。
+ * 所以先看当前角色，找不到就**扫描整个角色列表** —— 只要这张卡导入了，就一定能找到。
+ */
 function getSeed() {
     try {
-        const ch = C().characters?.[C().characterId];
-        const seed = ch?.data?.extensions?.radiowave?.seed;
-        return (seed && typeof seed === 'object') ? seed : null;
+        const ctx = C();
+        const cur = ctx.characters?.[ctx.characterId];
+        const s1 = cur?.data?.extensions?.radiowave?.seed;
+        if (s1 && typeof s1 === 'object') return s1;
+        for (const c of (ctx.characters ?? [])) {
+            const s2 = c?.data?.extensions?.radiowave?.seed;
+            if (s2 && typeof s2 === 'object') return s2;
+        }
+        return null;
     } catch { return null; }
 }
 
@@ -389,17 +408,23 @@ let _seedTried = 0;
 function seedProbe() {
     const ctx = C();
     const ch = ctx.characters?.[ctx.characterId];
+    const list = (ctx.characters ?? []).map((c, i) => ({
+        序号: i,
+        名字: c?.name,
+        有data: !!c?.data,
+        有radiowave: !!c?.data?.extensions?.radiowave,
+        有seed: !!c?.data?.extensions?.radiowave?.seed,
+        人数: c?.data?.extensions?.radiowave?.seed?.npc?.length ?? 0,
+    })).filter(x => x.有radiowave || x.有seed);
     return {
         当前角色索引: ctx.characterId,
         角色总数: ctx.characters?.length ?? 0,
-        角色名: ch?.name,
-        有data字段: !!ch?.data,
-        data的键: ch?.data ? Object.keys(ch.data).slice(0, 8) : null,
-        有extensions: !!ch?.data?.extensions,
-        extensions的键: ch?.data?.extensions ? Object.keys(ch.data.extensions) : null,
-        有radiowave: !!ch?.data?.extensions?.radiowave,
-        有seed: !!ch?.data?.extensions?.radiowave?.seed,
-        seed里的人数: ch?.data?.extensions?.radiowave?.seed?.npc?.length ?? 0,
+        当前角色名: ch?.name,
+        当前角色有data: !!ch?.data,
+        当前角色有radiowave: !!ch?.data?.extensions?.radiowave,
+        当前角色有seed: !!ch?.data?.extensions?.radiowave?.seed,
+        能拿到seed: !!getSeed(),
+        带radiowave标记的角色: list.length ? list : '（一个都没有 —— 说明卡里没带，或者角色数据还没加载）',
     };
 }
 
@@ -1010,7 +1035,14 @@ function applyStatePayload(state, payload) {
                         t.exp.count = Math.max(0, Math.round(Number(sub.count))); n++;
                     }
                     if (typeof sub.virgin === 'boolean') { t.exp.virgin = sub.virgin; n++; }
-                    if (sub.kinks) { t.exp.kinks = String(sub.kinks); n++; }
+                    // 性癖：接受数组或逗号分隔的字符串
+                    if (sub.kinks !== undefined && sub.kinks !== null && sub.kinks !== '') {
+                        const arr = Array.isArray(sub.kinks)
+                            ? sub.kinks.map(x => String(x).trim()).filter(Boolean)
+                            : String(sub.kinks).split(/[、，,;；/|]/).map(x => x.trim()).filter(Boolean);
+                        const merged = [...new Set([...(t.exp.kinks || []), ...arr])].slice(0, 8);
+                        if (merged.length) { t.exp.kinks = merged; n++; }
+                    }
                     continue;
                 }
                 for (const [f] of r.fields) {
@@ -1217,10 +1249,11 @@ function openPanel() {
     const s = getState();
     $q('#rw_clock').textContent = s.time || '08:32';
     $overlay.classList.add('rw_on');
+    layoutOverlay();
     closeSb();
     renderPage();
 }
-function closePanel() { $overlay?.classList.remove('rw_on'); closeSb(); }
+function closePanel() { $overlay?.classList.remove('rw_on'); layoutOverlay(); closeSb(); }
 
 function closeSb() { $q('#rw_sb')?.classList.remove('on'); }
 
@@ -1363,13 +1396,16 @@ function syncerBadge(n) {
 function regionBlock(n, r) {
     if (r.kind === 'exp') {
         const e = n.exp || {};
+        const kinks = Array.isArray(e.kinks) ? e.kinks : [];
         const rows = `
             <div class="sa-expgrid">
                 <div class="sa-expcell"><span>性交次数</span><b>${esc(e.count ?? 0)}</b></div>
                 <div class="sa-expcell"><span>是否为处女</span><b>${e.virgin ? '是' : '否'}</b></div>
             </div>
-            ${e.kinks ? `<div class="sa-wrow" style="margin-top:11px">
-                <span class="sa-wk">性癖</span><span class="sa-wv">${escU(e.kinks)}</span></div>` : ''}`;
+            <div class="sa-lbl" style="margin-top:14px">性癖<span style="margin-left:auto;font-size:9px;color:#c9c2d8">2-5 字标签</span></div>
+            ${kinks.length
+                ? `<div class="sa-tags">${kinks.map(t => `<span class="sa-kinktag">${escU(t)}</span>`).join('')}</div>`
+                : '<div class="sa-tagempty">（尚未记录）</div>'}`;
         return `<div class="sa-fold${r.collapsed ? '' : ' open'}">
             <div class="sa-foldh" data-act="fold"><span class="sa-vbar"></span>
                 <h4>${esc(r.label)}</h4><span class="sa-caret">⌄</span></div>
@@ -1465,7 +1501,7 @@ function viewWave(s) {
                 <div class="sa-wg"><span class="sa-wgk">范围</span><span class="sa-wgv">${esc(w.scope || '—')}</span></div>
                 <div class="sa-wg"><span class="sa-wgk">对象</span><span class="sa-wgv">${esc(w.target || '—')}</span></div>
                 <div class="sa-wg"><span class="sa-wgk">起始</span><span class="sa-wgv">${esc(w.start || '—')}</span></div>
-                <div class="sa-wg"><span class="sa-wgk">持续</span><span class="sa-wgv">${esc(w.dur || '—')}</span></div>
+                <div class="sa-wg"><span class="sa-wgk">持续</span><span class="sa-wgv">${esc(fmtDur(w.dur))}</span></div>
             </div>
             <div class="sa-wacts">
                 <button class="sa-mini go" data-act="edit-wave" data-i="${i}">✎ 编辑内容</button>
@@ -1904,28 +1940,131 @@ async function onBodyClick(e) {
 }
 
 /* ---------- 弹窗 ---------- */
+/** 渲染单个表单字段 */
+function renderField(f, state) {
+    const v = state[f.key];
+    const ph = f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : '';
+
+    if (f.type === 'group') return `<div class="rw_group">${esc(f.label)}</div>`;
+
+    if (f.type === 'tags') {
+        const arr = Array.isArray(v) ? v : [];
+        return `<label>${esc(f.label)}</label>
+            <div class="rw_tagsbox" data-tags="${esc(f.key)}">
+                <div class="rw_taglist">
+                    ${arr.map((t, i) => `<span class="rw_tag">${esc(t)}<button type="button" class="rw_tagx" data-tagdel="${esc(f.key)}" data-i="${i}">×</button></span>`).join('')}
+                </div>
+                <div class="rw_tagadd">
+                    <input type="text" data-taginput="${esc(f.key)}" placeholder="${esc(f.tagPlaceholder || '2-5 字')}" maxlength="10">
+                    <button type="button" data-tagadd="${esc(f.key)}">＋ 添加</button>
+                </div>
+            </div>`;
+    }
+
+    if (f.type === 'select') {
+        return `<label>${esc(f.label)}</label>
+            <select data-k="${esc(f.key)}">${(f.options || []).map(o =>
+                `<option value="${esc(o[0])}"${String(v) === String(o[0]) ? ' selected' : ''}>${esc(o[1])}</option>`
+            ).join('')}</select>`;
+    }
+
+    if (f.type === 'textarea') {
+        return `<label>${esc(f.label)}</label><textarea data-k="${esc(f.key)}">${esc(v ?? '')}</textarea>`;
+    }
+
+    const t = f.type === 'number' ? 'number'
+        : f.type === 'date' ? 'date'
+        : f.type === 'time' ? 'time' : 'text';
+    const extra = f.type === 'number'
+        ? ` min="${f.min ?? 0}"${f.max != null ? ` max="${f.max}"` : ''} inputmode="numeric"`
+        : '';
+    return `<label>${esc(f.label)}</label>
+        <input data-k="${esc(f.key)}" type="${t}" value="${esc(v ?? '')}"${extra}${ph}>`;
+}
+
 function modal(title, fields, onSubmit) {
     buildShell();
+    const state = {};
+    for (const f of fields) state[f.key] = (f.value !== undefined && f.value !== null) ? f.value : (f.type === 'tags' ? [] : '');
+
+    const isVisible = f => !f.showWhen || String(state[f.showWhen[0]] ?? '') === String(f.showWhen[1]);
+
+    const html = fields.map(f => {
+        const hide = f.showWhen ? ` style="display:${isVisible(f) ? '' : 'none'}"` : '';
+        return `<div class="rw_field" data-field="${esc(f.key)}"${hide}>${renderField(f, state)}</div>`;
+    }).join('');
+
     $q('#rw_box').innerHTML = `
         <h3>${esc(title)}</h3>
-        ${fields.map(f => {
-            if (f.type === 'textarea') return `<label>${esc(f.label)}</label><textarea data-k="${esc(f.key)}">${esc(f.value ?? '')}</textarea>`;
-            if (f.type === 'select') return `<label>${esc(f.label)}</label><select data-k="${esc(f.key)}">${f.options.map(o => `<option value="${esc(o[0])}"${String(f.value) === String(o[0]) ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`;
-            return `<label>${esc(f.label)}</label><input data-k="${esc(f.key)}" type="${f.type === 'number' ? 'number' : 'text'}" value="${esc(f.value ?? '')}">`;
-        }).join('')}
+        ${html}
         <div class="rw_acts"><button class="rw_no" data-m="no">取消</button><button class="rw_ok" data-m="ok">确定</button></div>`;
+
+    /** 把 DOM 里的值收回 state（不含标签，标签单独管） */
+    const collect = () => {
+        for (const el of $qa('#rw_box [data-k]')) state[el.dataset.k] = el.value;
+    };
+    /** 某个 select 变了，重算条件字段的显隐 */
+    const syncVisibility = () => {
+        collect();
+        for (const f of fields) {
+            if (!f.showWhen) continue;
+            const box = $q(`#rw_box [data-field="${f.key}"]`);
+            if (box) box.style.display = isVisible(f) ? '' : 'none';
+        }
+    };
+
+    $q('#rw_box').addEventListener('change', e => {
+        if (e.target.tagName === 'SELECT') syncVisibility();
+    });
+    $q('#rw_box').addEventListener('click', e => {
+        const add = e.target.closest('[data-tagadd]');
+        if (add) {
+            const key = add.dataset.tagadd;
+            const input = $q(`#rw_box [data-taginput="${key}"]`);
+            const val = String(input?.value || '').trim();
+            if (val) {
+                if (!Array.isArray(state[key])) state[key] = [];
+                if (!state[key].includes(val)) state[key].push(val);
+                input.value = '';
+                state[key] = state[key];       // 保持引用
+                refreshTagList(key);
+            }
+            return;
+        }
+        const del = e.target.closest('[data-tagdel]');
+        if (del) {
+            const key = del.dataset.tagdel;
+            const i = Number(del.dataset.i);
+            if (Array.isArray(state[key])) state[key].splice(i, 1);
+            refreshTagList(key);
+        }
+    });
+
+    function refreshTagList(key) {
+        const box = $q(`#rw_box [data-tags="${key}"] .rw_taglist`);
+        if (!box) return;
+        const arr = Array.isArray(state[key]) ? state[key] : [];
+        box.innerHTML = arr.map((t, i) =>
+            `<span class="rw_tag">${esc(t)}<button type="button" class="rw_tagx" data-tagdel="${esc(key)}" data-i="${i}">×</button></span>`
+        ).join('') || '<span class="rw_tagempty">（还没有标签）</span>';
+    }
+
+    syncVisibility();
+    $modal._state = state;
+    $modal._collect = collect;
     $modal.classList.add('rw_on');
     $modal.dataset.mode = 'form';
     $modal._submit = onSubmit;
-    const first = $q('#rw_box input, #rw_box textarea, #rw_box select');
+    const first = $q('#rw_box input[type="text"], #rw_box textarea, #rw_box select');
     if (first) setTimeout(() => first.focus(), 60);
 }
 
 function onModalClick(e) {
-    const b = e.target.closest('[data-m]'); if (!b) return;
+    const b = e.target.closest('[data-m]');
+    if (!b) return;                      // 标签的增删由 modal 内部的监听处理
     if (b.dataset.m === 'no') { $modal.classList.remove('rw_on'); return; }
-    const out = {};
-    for (const el of document.querySelectorAll('#rw_box [data-k]')) out[el.dataset.k] = el.value;
+    try { $modal._collect?.(); } catch { /* ignore */ }
+    const out = { ...($modal._state || {}) };
     $modal.classList.remove('rw_on');
     $modal._submit?.(out);
 }
@@ -1976,7 +2115,8 @@ async function editNpc(i) {
             fields.push({ key: 'exp_count', label: `${r.label} · 性交次数`, type: 'number', value: n.exp.count });
             fields.push({ key: 'exp_virgin', label: `${r.label} · 是否为处女`, type: 'select', value: String(n.exp.virgin),
                           options: [['true', '是'], ['false', '否']] });
-            fields.push({ key: 'exp_kinks', label: `${r.label} · 性癖`, type: 'textarea', value: n.exp.kinks });
+            fields.push({ key: 'exp_kinks', label: `${r.label} · 性癖（2-5 字标签，至少 3 个且不重复）`,
+                          type: 'tags', value: n.exp.kinks, tagPlaceholder: '2-5 字' });
             continue;
         }
         for (const [f, label] of r.fields) {
@@ -2007,11 +2147,19 @@ async function editNpc(i) {
         if (!data.name) return;
         for (const r of NPC_REGIONS) {
             if (r.kind === 'exp') {
+                const kinks = (Array.isArray(v.exp_kinks) ? v.exp_kinks : [])
+                    .map(x => String(x).trim())
+                    .filter(Boolean)
+                    .filter((x, idx, arr) => arr.indexOf(x) === idx)   // 同一个人内部不重复
+                    .slice(0, 8);
                 data.exp = {
                     count: Math.max(0, Math.round(Number(v.exp_count) || 0)),
                     virgin: v.exp_virgin === 'true',
-                    kinks: v.exp_kinks || '',
+                    kinks,
                 };
+                if (isNew && kinks.length < 3) {
+                    toast('warning', '新角色的性癖至少要 3 个标签 —— 已保存，记得回来补');
+                }
                 continue;
             }
             data[r.key] = {};
@@ -2029,35 +2177,156 @@ async function editNpc(i) {
     });
 }
 
+/* ---------- 电波的时间 / 范围 / 对象 ---------- */
+const DUR_KEYS = [['Y', '年'], ['M', '月'], ['D', '日'], ['h', '小时'], ['m', '分钟'], ['s', '秒']];
+const DUR_LABEL = { Y: 'Y 年', M: 'M 月', D: 'D 日', h: 'h 时', m: 'm 分', s: 's 秒' };
+const CUSTOM = '__custom__';
+const CITYWIDE = '全市';
+
+/** "2017-09-14 14:30" → {date:'2017-09-14', time:'14:30'} */
+function parseStart(v) {
+    const t = String(v ?? '');
+    const pad = n => String(n).padStart(2, '0');
+    const d = /(\d{4})\s*[-/年.]\s*(\d{1,2})\s*[-/月.]\s*(\d{1,2})/.exec(t);
+    const h = /(\d{1,2})\s*[:：时]\s*(\d{1,2})/.exec(t);
+    return {
+        date: d ? `${d[1]}-${pad(d[2])}-${pad(d[3])}` : '',
+        time: h ? `${pad(h[1])}:${pad(h[2])}` : '',
+    };
+}
+function composeStart(date, time) {
+    const d = String(date || '').trim();
+    const t = String(time || '').trim();
+    return [d, t].filter(Boolean).join(' ');
+}
+
+/** "1Y 2M 3D 4h 5m 6s" → {Y:1,M:2,...}（大小写敏感：M=月，m=分） */
+function parseDur(v) {
+    const out = { Y: 0, M: 0, D: 0, h: 0, m: 0, s: 0 };
+    const t = String(v ?? '');
+    for (const [k] of DUR_KEYS) {
+        const m = new RegExp('(\\d+)\\s*' + k).exec(t);
+        if (m) out[k] = Number(m[1]) || 0;
+    }
+    return out;
+}
+function composeDur(p) {
+    const parts = DUR_KEYS.filter(([k]) => Number(p?.[k]) > 0).map(([k]) => `${Number(p[k])}${k}`);
+    return parts.join(' ');
+}
+/** 展示用：全 0 显示「立即」 */
+function fmtDur(v) {
+    const d = composeDur(parseDur(v));
+    return d || '立即';
+}
+
+/** 生效范围选项：全市 + 每个地点（含子地点，标注所属）+ 自定义 */
+function scopeOptions(locs) {
+    const opts = [[CITYWIDE, '全市（整个临江市）']];
+    const sorted = Object.entries(locs).sort((a, b) => {
+        const pa = a[1].parent || 'city', pb = b[1].parent || 'city';
+        if (pa !== pb) return pa === 'city' ? -1 : (pb === 'city' ? 1 : pa.localeCompare(pb));
+        return (a[1].y ?? 0) - (b[1].y ?? 0) || (a[1].x ?? 0) - (b[1].x ?? 0);
+    });
+    for (const [, l] of sorted) {
+        const parent = (l.parent && l.parent !== 'city') ? (locs[l.parent]?.name ?? '') : '';
+        opts.push([l.name, parent ? `　${parent} · ${l.name}` : `　${l.name}`]);
+    }
+    opts.push([CUSTOM, '自定义…']);
+    return opts;
+}
+
+/** 影响对象选项：档案里每个未隐藏的人 + 自定义 */
+function targetOptions(state) {
+    const opts = visibleNpcs(state).map(n => [n.name, n.name]);
+    opts.push([CUSTOM, '自定义…']);
+    return opts;
+}
+
 async function editWave(i) {
     const s = getState();
-    const w = i === null ? { name: '', body: '', scope: '', target: '', start: '', dur: '', state: 'on' } : s.waves[i];
+    const locs = getLocs();
+    const isNew = i === null;
+    const w = isNew
+        ? { name: '', body: '', scope: CITYWIDE, target: CUSTOM, start: '', dur: '', state: 'on' }
+        : s.waves[i];
     if (!w) return;
-    modal(i === null ? '新电波' : `编辑 · ${w.name}`, [
+
+    // 范围：命中已有地点名就直接选中，否则落到「自定义」并预填
+    const scOpts = scopeOptions(locs);
+    const scopeVals = scOpts.map(o => o[0]);
+    const scopeSel = scopeVals.includes(w.scope) ? w.scope : CUSTOM;
+    const scopeCustom = scopeSel === CUSTOM ? (w.scope || '') : '';
+
+    // 对象：命中档案里的人就直接选中，否则落到「自定义」并预填
+    const tgOpts = targetOptions(s);
+    const tgVals = tgOpts.map(o => o[0]);
+    const targetSel = tgVals.includes(w.target) ? w.target : CUSTOM;
+    const targetCustom = targetSel === CUSTOM ? (w.target || '') : '';
+
+    const st = parseStart(w.start);
+    const dp = parseDur(w.dur);
+
+    const fields = [
         { key: 'name', label: '电波名称', value: w.name },
         { key: 'body', label: '电波内容', type: 'textarea', value: w.body },
-        { key: 'scope', label: '生效范围', value: w.scope },
-        { key: 'target', label: '影响对象', value: w.target },
-        { key: 'start', label: '起始时间', value: w.start },
-        { key: 'dur', label: '持续时间', value: w.dur },
-        { key: 'state', label: '状态', type: 'select', value: w.state, options: [['on', '生效中'], ['pending', '未发射'], ['expired', '已失效']] },
-    ], async v => {
-        if (!v.name.trim()) return;
-        if (i === null) {
-            // 用户手建时也先查重，避免和已有电波撞车
-            const dup = findWaveIndex(s.waves, v.name);
+
+        { key: 'scope', label: '生效范围', type: 'select', value: scopeSel, options: scOpts },
+        { key: 'scopeCustom', label: '自定义范围', value: scopeCustom, placeholder: '例：西岸所有便利店',
+          showWhen: ['scope', CUSTOM] },
+
+        { key: 'target', label: '影响对象', type: 'select', value: targetSel, options: tgOpts },
+        { key: 'targetCustom', label: '自定义对象', value: targetCustom, placeholder: '例：穿红衣服的人',
+          showWhen: ['target', CUSTOM] },
+
+        { type: 'group', key: '_g1', label: '起始时间' },
+        { key: 'startDate', label: '日期', type: 'date', value: st.date },
+        { key: 'startTime', label: '时间（24 小时制）', type: 'time', value: st.time },
+
+        { type: 'group', key: '_g2', label: '持续时间（留 0 表示立即生效、不自动结束）' },
+        ...DUR_KEYS.map(([k]) => ({
+            key: 'dur_' + k, label: DUR_LABEL[k], type: 'number',
+            value: Number(dp[k]) || 0, min: 0, max: 99999,
+        })),
+
+        { key: 'state', label: '状态', type: 'select', value: w.state,
+          options: [['on', '生效中'], ['pending', '未发射'], ['expired', '已失效']] },
+    ];
+
+    modal(isNew ? '新电波' : `编辑 · ${w.name}`, fields, async v => {
+        const name = String(v.name || '').trim();
+        if (!name) { toast('warning', '电波名称不能为空'); return; }
+
+        const scope = v.scope === CUSTOM ? String(v.scopeCustom || '').trim() : String(v.scope || '');
+        const target = v.target === CUSTOM ? String(v.targetCustom || '').trim() : String(v.target || '');
+        const durParts = {};
+        for (const [k] of DUR_KEYS) durParts[k] = Math.max(0, Math.round(Number(v['dur_' + k]) || 0));
+
+        const data = {
+            name,
+            body: String(v.body || '').trim(),
+            scope: scope || CITYWIDE,
+            target,
+            start: composeStart(v.startDate, v.startTime),
+            dur: composeDur(durParts),
+            durParts,
+            state: ['on', 'pending', 'expired'].includes(v.state) ? v.state : 'on',
+        };
+
+        if (isNew) {
+            const dup = findWaveIndex(s.waves, name);
             if (dup > -1) {
                 const t = s.waves[dup];
-                Object.assign(t, v, { name: t.name });
+                Object.assign(t, data, { name: t.name });
                 await syncWaveToLore(t);
                 await saveState(); renderPage();
                 toast('info', `已合并到已有电波「${t.name}」`);
                 return;
             }
-            s.waves.push({ id: Date.now(), ...v, name: v.name.trim(), synced: false, loreUid: null, origin: 'user' });
+            s.waves.push({ id: Date.now(), synced: false, loreUid: null, origin: 'user', ...data });
             await syncWaveToLore(s.waves[s.waves.length - 1]);
         } else {
-            Object.assign(s.waves[i], v, { name: v.name.trim() });
+            Object.assign(s.waves[i], data);
             await syncWaveToLore(s.waves[i]);
         }
         await saveState(); renderPage();
@@ -2287,18 +2556,58 @@ function shouldShowLauncher() {
 
 let _launcherHinted = false;
 
-/**
- * 悬浮球定位。
+/* ------------------------------------------------------------
+ * position: fixed 在手机上的坑
  *
- * 教训：只靠 style.css 里的 `position: fixed` 在手机上不可靠 ——
- * 酒馆主题、SillyDroid 宿主样式、或者某个祖先元素上的 transform/filter
- * 都可能让 fixed 失效，或者把它压到看不见的地方。
- * 所以这里用**内联样式**写死关键属性（优先级仅次于 !important），
- * 并在挂载后做一次自检，把「谁盖住了我」打进日志。
+ * 只要**任何一个祖先元素**带 transform / filter / perspective / contain:paint /
+ * will-change，`position: fixed` 就会退化成「相对该祖先的 absolute」。
+ * 表现：
+ *   · 悬浮球跑到页面里而不是贴在屏幕角落
+ *   · 面板不铺满屏幕，下面还能看到酒馆自己的界面
+ *
+ * 对策：检测到这种祖先就把元素直接挂到 <html> 下，绕过它。
+ * ------------------------------------------------------------ */
+function blockingAncestor(el) {
+    let p = el?.parentElement;
+    while (p && p !== document.documentElement) {
+        try {
+            const cs = window.getComputedStyle(p);
+            if ((cs.transform && cs.transform !== 'none')
+                || (cs.filter && cs.filter !== 'none')
+                || (cs.perspective && cs.perspective !== 'none')
+                || (cs.willChange && /transform|filter|perspective/.test(cs.willChange))
+                || (cs.contain && /paint|layout|content|strict/.test(cs.contain))) {
+                return p;
+            }
+        } catch { /* ignore */ }
+        p = p.parentElement;
+    }
+    return null;
+}
+
+/** 有拦截祖先就把它挂到 <html> 下；返回是否移动过 */
+function detachToHtml(el, label) {
+    if (!el || el.parentElement === document.documentElement) return false;
+    const bad = blockingAncestor(el);
+    if (!bad) return false;
+    try {
+        document.documentElement.appendChild(el);
+        const who = '<' + bad.tagName.toLowerCase() + (bad.id ? '#' + bad.id : (bad.className ? '.' + String(bad.className).split(' ')[0] : '')) + '>';
+        log(`${label}：祖先 ${who} 带 transform/filter，会让 position:fixed 失效 —— 已把它移到 <html> 下。`);
+        return true;
+    } catch (e) {
+        warn(`${label}：移出失败`, e);
+        return false;
+    }
+}
+
+/**
+ * 悬浮球定位（内联样式硬压，不依赖 style.css）。
  */
 function layoutLauncher(show) {
     const el = $q('#rw_launcher');
     if (!el) return null;
+    detachToHtml(el, '悬浮球');
     const narrow = (window.innerWidth || 400) <= 460;
     Object.assign(el.style, {
         position: 'fixed',
@@ -2319,6 +2628,49 @@ function layoutLauncher(show) {
     });
     el.classList.remove('rw_hidden');
     return el;
+}
+
+/**
+ * 覆盖层 + 面板的全屏布局。
+ * 同样用内联样式写死，并显式给出像素尺寸，兜住 `inset:0` 失效的情况。
+ */
+function layoutOverlay() {
+    if (!$overlay) return;
+    detachToHtml($overlay, 'App 面板');
+    const on = $overlay.classList.contains('rw_on');
+    const vw = window.innerWidth || document.documentElement.clientWidth || 400;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 720;
+
+    Object.assign($overlay.style, {
+        position: 'fixed',
+        top: '0px', left: '0px', right: 'auto', bottom: 'auto',
+        width: vw + 'px', height: vh + 'px',
+        margin: '0', padding: '0', border: '0',
+        boxSizing: 'border-box',
+        zIndex: '2147483001',
+        display: on ? 'flex' : 'none',
+        alignItems: 'center', justifyContent: 'center',
+        overflow: 'auto',
+        background: 'rgba(8, 6, 14, .74)',
+    });
+
+    if ($panel) {
+        Object.assign($panel.style, {
+            width: Math.min(382, vw) + 'px',
+            maxWidth: '100%',
+            maxHeight: vh + 'px',
+            margin: '0',
+            boxSizing: 'border-box',
+        });
+    }
+    const phone = $q('#rw_panel .sa-phone');
+    if (phone) {
+        Object.assign(phone.style, {
+            height: Math.max(320, vh - 12) + 'px',
+            maxHeight: vh + 'px',
+            borderRadius: (vw <= 460 ? '0' : '40px'),
+        });
+    }
 }
 
 /** 挂载后自检：位置、计算样式、以及中心点最上层是谁 */
@@ -2404,11 +2756,13 @@ async function init() {
     //  2. 手机旋转 / 键盘弹出导致视口变化，fixed 定位需要重算
     //  3. 角色卡数据晚加载，shouldShowLauncher() 的判断结果会变
     [300, 1000, 2000, 4000, 8000].forEach(ms => setTimeout(() => {
-        try { refreshLauncher(); } catch (e) { warn('定时刷新悬浮球失败', e); }
+        try { refreshLauncher(); layoutOverlay(); } catch (e) { warn('定时刷新失败', e); }
     }, ms));
     try {
-        window.addEventListener('resize', () => { try { refreshLauncher(); } catch { /* ignore */ } });
-        window.addEventListener('orientationchange', () => { try { refreshLauncher(); } catch { /* ignore */ } });
+        const onViewport = () => { try { refreshLauncher(); layoutOverlay(); } catch { /* ignore */ } };
+        window.addEventListener('resize', onViewport);
+        window.addEventListener('orientationchange', onViewport);
+        if (window.visualViewport) window.visualViewport.addEventListener('resize', onViewport);
     } catch { /* ignore */ }
 
     log(`扩展已加载 v${EXT_VERSION}`);

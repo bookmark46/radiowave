@@ -27,7 +27,7 @@ const toast = (kind, msg) => {
 };
 
 /** 扩展版本 —— 出问题时先看控制台这一行，确认加载的是哪一版 */
-const EXT_VERSION = '0.13.4';
+const EXT_VERSION = '0.15.0';
 
 /* ---------- 性别识别 ----------
  * AI 在中文语境下会写 "女" / "女生" / "女性"，英文语境会写 "female"。
@@ -282,6 +282,7 @@ function migrateNpc(n) {
 const DEFAULT_STATE = {
     version: 2,
     day: 1,
+    date: '2017-09-14',     // 剧情当前日期（由开场白设定，之后可由 AI 推进）
     time: '08:32',
     player: {
         name: '',
@@ -315,7 +316,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     autoExtract: true,
     syncLorebook: true,
     quietFallback: true,
-    _settingsVersion: 2,
+    panelScale: 1,        // 面板缩放（手机装不下时调小）
+    _settingsVersion: 3,
 });
 
 /* ============================================================
@@ -334,6 +336,11 @@ function getSettings() {
     if ((st._settingsVersion ?? 1) < 2) {
         st.alwaysShowLauncher = true;
         st._settingsVersion = 2;
+        try { C().saveSettingsDebounced(); } catch { /* ignore */ }
+    }
+    if ((st._settingsVersion ?? 1) < 3) {
+        if (typeof st.panelScale !== 'number') st.panelScale = 1;
+        st._settingsVersion = 3;
         try { C().saveSettingsDebounced(); } catch { /* ignore */ }
     }
 
@@ -992,11 +999,14 @@ function applyStatePayload(state, payload) {
     const locs = getLocs();
 
     if (payload.player && typeof payload.player === 'object') {
-        for (const k of ['place', 'placeText', 'outfit', 'note', 'title', 'identity', 'age']) {
+        for (const k of ['place', 'placeText', 'outfit', 'note', 'title', 'identity', 'age', 'date', 'time']) {
             if (payload.player[k] !== undefined && payload.player[k] !== null && payload.player[k] !== '') {
                 state.player[k] = payload.player[k]; n++;
             }
         }
+        // date / time 也同步到顶层（主页和电波起始时间都用它）
+        if (payload.player.date) state.date = String(payload.player.date);
+        if (payload.player.time) state.time = String(payload.player.time);
     }
 
     for (const src of [payload.npc, payload.npcs, payload.characters]) {
@@ -1279,6 +1289,14 @@ function renderPage() {
 }
 
 /* ---------- 主页 ---------- */
+
+/** '2017-09-14' → '2017 年 9 月 14 日' */
+function fmtDateCN(d) {
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(d || '').trim());
+    if (!m) return String(d || '日期未知');
+    return `${m[1]} 年 ${Number(m[2])} 月 ${Number(m[3])} 日`;
+}
+
 function viewHome(s) {
     const locs = getLocs();
     const live = s.waves.filter(w => w.state === 'on').length;
@@ -1286,7 +1304,7 @@ function viewHome(s) {
     return `
     <div class="sa-head">
         <div><h1 class="sa-title">无意识电波</h1>
-        <p class="sa-sub">第 ${esc(s.day)} 天 · ${esc(s.time)}</p></div>
+        <p class="sa-sub">${esc(fmtDateCN(s.date || s.player?.date))} · ${esc(s.time)}</p></div>
         <button class="sa-ghost" data-act="edit-player">编辑</button>
     </div>
     <div class="sa-hero"><div class="sa-hrow">
@@ -1501,7 +1519,7 @@ function viewWave(s) {
                 <div class="sa-wg"><span class="sa-wgk">范围</span><span class="sa-wgv">${esc(w.scope || '—')}</span></div>
                 <div class="sa-wg"><span class="sa-wgk">对象</span><span class="sa-wgv">${esc(w.target || '—')}</span></div>
                 <div class="sa-wg"><span class="sa-wgk">起始</span><span class="sa-wgv">${esc(w.start || '—')}</span></div>
-                <div class="sa-wg"><span class="sa-wgk">持续</span><span class="sa-wgv">${esc(fmtDur(w.dur))}</span></div>
+                <div class="sa-wg"><span class="sa-wgk">持续</span><span class="sa-wgv">${escU(w.dur || '立即')}</span></div>
             </div>
             <div class="sa-wacts">
                 <button class="sa-mini go" data-act="edit-wave" data-i="${i}">✎ 编辑内容</button>
@@ -2053,19 +2071,57 @@ function modal(title, fields, onSubmit) {
     $modal._state = state;
     $modal._collect = collect;
     $modal.classList.add('rw_on');
+    layoutModal();                 // ← 关键：弹窗必须压在覆盖层之上
     $modal.dataset.mode = 'form';
     $modal._submit = onSubmit;
     const first = $q('#rw_box input[type="text"], #rw_box textarea, #rw_box select');
     if (first) setTimeout(() => first.focus(), 60);
 }
 
+/**
+ * 编辑弹窗的全屏布局。
+ *
+ * 曾经的 bug：覆盖层用内联样式设了 z-index 2147483001，
+ * 而弹窗还是 CSS 里的 30002 —— 数字小的被压在下面，
+ * 表现就是「弹窗藏在主界面底层，得先叉掉主界面才能看见」。
+ * 现在两边都用内联样式，弹窗比覆盖层高一级。
+ */
+function layoutModal() {
+    if (!$modal) return;
+    detachToHtml($modal, '编辑弹窗');
+    const on = $modal.classList.contains('rw_on');
+    $modal.style.display = on ? 'flex' : 'none';
+    if (!on) return;
+
+    // 和覆盖层同样处理：先试 fixed，量出来没贴住就退化成 absolute
+    pinToViewport($modal, '编辑弹窗', 2147483002, 'rgba(8, 6, 14, .55)');
+    Object.assign($modal.style, {
+        alignItems: 'center', justifyContent: 'center', padding: '16px',
+    });
+
+    const vh = window.innerHeight || document.documentElement.clientHeight || 720;
+    const scale = Math.min(1, Math.max(0.55, Number(getSettings().panelScale) || 1));
+    const box = $q('#rw_box');
+    if (box) {
+        Object.assign(box.style, {
+            maxHeight: Math.round((vh - 32) / scale) + 'px',
+            overflowY: 'auto',
+            margin: '0',
+            boxSizing: 'border-box',
+            transform: scale !== 1 ? `scale(${scale})` : 'none',
+            transformOrigin: 'center center',
+        });
+    }
+}
+
 function onModalClick(e) {
     const b = e.target.closest('[data-m]');
     if (!b) return;                      // 标签的增删由 modal 内部的监听处理
-    if (b.dataset.m === 'no') { $modal.classList.remove('rw_on'); return; }
+    if (b.dataset.m === 'no') { $modal.classList.remove('rw_on'); layoutModal(); return; }
     try { $modal._collect?.(); } catch { /* ignore */ }
     const out = { ...($modal._state || {}) };
     $modal.classList.remove('rw_on');
+    layoutModal();
     $modal._submit?.(out);
 }
 
@@ -2265,7 +2321,9 @@ async function editWave(i) {
     const targetCustom = targetSel === CUSTOM ? (w.target || '') : '';
 
     const st = parseStart(w.start);
-    const dp = parseDur(w.dur);
+    // 新建时，起始时间默认取**剧情当前时间**（不是现实时间）
+    const storyDate = s.date || DEFAULT_STATE.date;
+    const storyTime = s.time || DEFAULT_STATE.time;
 
     const fields = [
         { key: 'name', label: '电波名称', value: w.name },
@@ -2279,15 +2337,13 @@ async function editWave(i) {
         { key: 'targetCustom', label: '自定义对象', value: targetCustom, placeholder: '例：穿红衣服的人',
           showWhen: ['target', CUSTOM] },
 
-        { type: 'group', key: '_g1', label: '起始时间' },
-        { key: 'startDate', label: '日期', type: 'date', value: st.date },
-        { key: 'startTime', label: '时间（24 小时制）', type: 'time', value: st.time },
+        { type: 'group', key: '_g1', label: `起始时间（默认取剧情当前时间：${fmtDateCN(storyDate)} ${storyTime}）` },
+        { key: 'startDate', label: '日期', type: 'date', value: st.date || storyDate },
+        { key: 'startTime', label: '时间（24 小时制）', type: 'time', value: st.time || storyTime },
 
-        { type: 'group', key: '_g2', label: '持续时间（留 0 表示立即生效、不自动结束）' },
-        ...DUR_KEYS.map(([k]) => ({
-            key: 'dur_' + k, label: DUR_LABEL[k], type: 'number',
-            value: Number(dp[k]) || 0, min: 0, max: 99999,
-        })),
+        { type: 'group', key: '_g2', label: '持续时间' },
+        { key: 'durText', label: '持续时间（自行填写；留空表示立即生效且不自动结束）',
+          value: w.dur || '', placeholder: '例：2 小时 / 三天 / 到今晚十二点 / 持续到有人发现为止' },
 
         { key: 'state', label: '状态', type: 'select', value: w.state,
           options: [['on', '生效中'], ['pending', '未发射'], ['expired', '已失效']] },
@@ -2299,8 +2355,6 @@ async function editWave(i) {
 
         const scope = v.scope === CUSTOM ? String(v.scopeCustom || '').trim() : String(v.scope || '');
         const target = v.target === CUSTOM ? String(v.targetCustom || '').trim() : String(v.target || '');
-        const durParts = {};
-        for (const [k] of DUR_KEYS) durParts[k] = Math.max(0, Math.round(Number(v['dur_' + k]) || 0));
 
         const data = {
             name,
@@ -2308,8 +2362,7 @@ async function editWave(i) {
             scope: scope || CITYWIDE,
             target,
             start: composeStart(v.startDate, v.startTime),
-            dur: composeDur(durParts),
-            durParts,
+            dur: String(v.durText || '').trim(),
             state: ['on', 'pending', 'expired'].includes(v.state) ? v.state : 'on',
         };
 
@@ -2409,6 +2462,28 @@ function updateBadge() {
    九、设置面板 + 维护操作
    ============================================================ */
 
+/**
+ * 往酒馆自己的「扩展」菜单（🧩 图标）里塞一个入口。
+ *
+ * 这是最可靠的入口 —— 它用的是酒馆自己的布局，完全不依赖 position:fixed，
+ * 所以不受手机 WebView / 宿主样式的影响。悬浮球万一还是不显示，从这儿一定进得去。
+ */
+function buildMenuEntry() {
+    if ($q('#rw_menu_item')) return true;
+    const menu = $q('#extensionsMenu');
+    if (!menu) return false;
+    menu.insertAdjacentHTML('beforeend', `
+        <div id="rw_menu_item" class="list-group-item flex-container flexGap5 interactable" tabindex="0">
+            <div class="fa-solid fa-mobile-screen-button"></div>
+            <span>无意识电波 App</span>
+        </div>`);
+    $q('#rw_menu_item')?.addEventListener('click', () => {
+        try { openPanel(); } catch (e) { warn('打开面板失败', e); toast('error', '打开失败，请看控制台'); }
+    });
+    log('已往酒馆的 🧩 扩展菜单里加入 App 入口（这个入口不依赖 position:fixed，最可靠）。');
+    return true;
+}
+
 function buildSettingsUI() {
     if ($q('#rw_settings')) return;
     const st = getSettings();
@@ -2431,6 +2506,15 @@ function buildSettingsUI() {
                 <span>解析失败时发一次静默请求兜底（会产生额外 API 调用）</span></label>
             <label class="checkbox_label"><input type="checkbox" id="rw_s_lore" ${st.syncLorebook ? 'checked' : ''}>
                 <span>把电波同步进「聊天绑定世界书」</span></label>
+            <label class="checkbox_label" style="align-items:center">
+                <span style="flex:none">面板缩放：</span>
+                <select id="rw_s_scale" style="flex:1;padding:4px 8px;border-radius:8px">
+                    ${[['1', '100%（默认）'], ['0.9', '90%'], ['0.8', '80%'], ['0.7', '70%'], ['0.6', '60%（手机推荐）']]
+                        .map(([v, t]) => `<option value="${v}"${Number(st.panelScale) === Number(v) ? ' selected' : ''}>${t}</option>`).join('')}
+                </select></label>
+            <small style="opacity:.7;display:block;margin:-2px 0 6px">
+                手机上如果 App 面板显示不全（尤其是看不到最上面），把缩放调小。
+            </small>
             <hr>
             <div class="rw_btns">
                 <button id="rw_b_rescan" class="menu_button">重新处理变量</button>
@@ -2457,6 +2541,14 @@ function buildSettingsUI() {
     bind('#rw_s_extract', 'autoExtract');
     bind('#rw_s_quiet', 'quietFallback');
     bind('#rw_s_lore', 'syncLorebook');
+
+    $q('#rw_s_scale')?.addEventListener('change', function () {
+        getSettings().panelScale = Number(this.value) || 1;
+        try { C().saveSettingsDebounced(); } catch { /* ignore */ }
+        layoutOverlay();
+        layoutModal();
+        toast('success', `面板缩放已设为 ${Math.round((Number(this.value) || 1) * 100)}%`);
+    });
 
     // 保底入口：悬浮球万一没显示，从这里也能进 App
     $q('#rw_b_open').addEventListener('click', () => {
@@ -2634,40 +2726,76 @@ function layoutLauncher(show) {
  * 覆盖层 + 面板的全屏布局。
  * 同样用内联样式写死，并显式给出像素尺寸，兜住 `inset:0` 失效的情况。
  */
+/**
+ * 把一个元素真正按视口钉住。
+ *
+ * 做法：先按 position:fixed 摆好，**然后量一次实际位置**。
+ * 如果没贴住（祖先有 transform/filter 时 fixed 会退化成 absolute），
+ * 就换成 absolute + 当前滚动偏移，并在 scroll 时重算。
+ * 这样无论环境怎么折腾，元素一定落在视口里。
+ */
+function pinToViewport(el, label, zIndex, bg) {
+    if (!el) return false;
+    const vw = window.innerWidth || document.documentElement.clientWidth || 400;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 720;
+    const base = {
+        left: '0px', right: 'auto', bottom: 'auto',
+        width: vw + 'px', height: vh + 'px',
+        margin: '0', padding: '0', border: '0', boxSizing: 'border-box',
+        flex: 'none', zIndex: String(zIndex),
+        overflow: 'auto', background: bg,
+    };
+    Object.assign(el.style, base, { position: 'fixed', top: '0px' });
+
+    let r;
+    try { r = el.getBoundingClientRect(); } catch { r = null; }
+    const ok = !!r && Math.abs(r.top) < 3 && Math.abs(r.left) < 3 && Math.abs(r.height - vh) < 8;
+    if (ok) { el.dataset.rwPin = 'fixed'; return true; }
+
+    const sy = window.scrollY || document.documentElement.scrollTop || 0;
+    const sx = window.scrollX || document.documentElement.scrollLeft || 0;
+    Object.assign(el.style, base, { position: 'absolute', top: sy + 'px', left: sx + 'px' });
+    el.dataset.rwPin = 'absolute';
+    if (el.dataset.rwWarned !== '1') {
+        el.dataset.rwWarned = '1';
+        warn(`${label}：position:fixed 在当前环境失效`
+            + `（实测 top=${r ? Math.round(r.top) : '?'}，期望 0；高=${r ? Math.round(r.height) : '?'}，期望 ${vh}）`
+            + `，已自动切换成 absolute + 滚动偏移兜底。`);
+    }
+    return false;
+}
+
 function layoutOverlay() {
     if (!$overlay) return;
     detachToHtml($overlay, 'App 面板');
     const on = $overlay.classList.contains('rw_on');
+    $overlay.style.display = on ? 'flex' : 'none';
+    if (!on) return;
+
+    pinToViewport($overlay, 'App 面板', 2147483001, 'rgba(8, 6, 14, .74)');
+    Object.assign($overlay.style, { alignItems: 'center', justifyContent: 'center' });
+
     const vw = window.innerWidth || document.documentElement.clientWidth || 400;
     const vh = window.innerHeight || document.documentElement.clientHeight || 720;
-
-    Object.assign($overlay.style, {
-        position: 'fixed',
-        top: '0px', left: '0px', right: 'auto', bottom: 'auto',
-        width: vw + 'px', height: vh + 'px',
-        margin: '0', padding: '0', border: '0',
-        boxSizing: 'border-box',
-        zIndex: '2147483001',
-        display: on ? 'flex' : 'none',
-        alignItems: 'center', justifyContent: 'center',
-        overflow: 'auto',
-        background: 'rgba(8, 6, 14, .74)',
-    });
+    // 缩放比例：手机上如果面板还是装不下，可以在扩展设置里调小
+    const scale = Math.min(1, Math.max(0.55, Number(getSettings().panelScale) || 1));
 
     if ($panel) {
         Object.assign($panel.style, {
             width: Math.min(382, vw) + 'px',
             maxWidth: '100%',
-            maxHeight: vh + 'px',
+            maxHeight: Math.round(vh / scale) + 'px',
             margin: '0',
             boxSizing: 'border-box',
+            transform: scale !== 1 ? `scale(${scale})` : 'none',
+            transformOrigin: 'center center',
         });
     }
     const phone = $q('#rw_panel .sa-phone');
     if (phone) {
         Object.assign(phone.style, {
-            height: Math.max(320, vh - 12) + 'px',
-            maxHeight: vh + 'px',
+            height: Math.max(320, Math.round((vh - 12) / scale)) + 'px',
+            maxHeight: '100%',
             borderRadius: (vw <= 460 ? '0' : '40px'),
         });
     }
@@ -2743,9 +2871,13 @@ async function init() {
     eventSource.on(event_types.MESSAGE_SWIPED, () => { if ($overlay?.classList.contains('rw_on')) renderPage(); });
 
     // 设置面板要等酒馆 UI 就绪
-    const mountSettings = () => { try { buildSettingsUI(); } catch (e) { warn('设置面板挂载失败', e); } };
+    const mountSettings = () => {
+        try { buildSettingsUI(); } catch (e) { warn('设置面板挂载失败', e); }
+        try { buildMenuEntry(); } catch (e) { warn('扩展菜单入口挂载失败', e); }
+    };
     eventSource.on(event_types.APP_READY, mountSettings);
     setTimeout(mountSettings, 1500);
+    setTimeout(mountSettings, 4000);
 
     // 角色卡的完整数据是「浅加载」的，可能晚于本扩展加载 —— 所以定时补种几次
     eventSource.on(event_types.APP_READY, () => { refreshLauncher(); doSeed('APP_READY'); });
@@ -2756,13 +2888,31 @@ async function init() {
     //  2. 手机旋转 / 键盘弹出导致视口变化，fixed 定位需要重算
     //  3. 角色卡数据晚加载，shouldShowLauncher() 的判断结果会变
     [300, 1000, 2000, 4000, 8000].forEach(ms => setTimeout(() => {
-        try { refreshLauncher(); layoutOverlay(); } catch (e) { warn('定时刷新失败', e); }
+        try { refreshLauncher(); layoutOverlay(); layoutModal(); } catch (e) { warn('定时刷新失败', e); }
     }, ms));
     try {
-        const onViewport = () => { try { refreshLauncher(); layoutOverlay(); } catch { /* ignore */ } };
+        const onViewport = () => {
+            try { refreshLauncher(); layoutOverlay(); layoutModal(); } catch { /* ignore */ }
+        };
         window.addEventListener('resize', onViewport);
         window.addEventListener('orientationchange', onViewport);
         if (window.visualViewport) window.visualViewport.addEventListener('resize', onViewport);
+
+        // 如果 fixed 失效、退化成了 absolute，就得跟着滚动重算位置
+        let ticking = 0;
+        window.addEventListener('scroll', () => {
+            if (ticking) return;
+            ticking = requestAnimationFrame(() => {
+                ticking = 0;
+                try {
+                    if ($overlay && $overlay.dataset.rwPin === 'absolute') layoutOverlay();
+                    if ($modal && $modal.dataset.rwPin === 'absolute') layoutModal();
+                    if ($q('#rw_launcher') && $q('#rw_launcher').dataset.rwPin === 'absolute') {
+                        layoutLauncher(shouldShowLauncher());
+                    }
+                } catch { /* ignore */ }
+            });
+        }, { passive: true });
     } catch { /* ignore */ }
 
     log(`扩展已加载 v${EXT_VERSION}`);
